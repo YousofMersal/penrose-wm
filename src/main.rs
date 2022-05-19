@@ -1,23 +1,25 @@
 #[macro_use]
 extern crate penrose;
 
-use std::fs::File;
+#[macro_use]
+extern crate tracing;
+
+use std::{collections::HashMap, fs::File};
 
 use penrose::{
     contrib::{
-        extensions::Scratchpad,
+        extensions::{Scratchpad, dmenu::*},
         hooks::{DefaultWorkspace, LayoutSymbolAsRootName},
         layouts::paper,
     },
     core::{
-        bindings::MouseEvent,
         config::Config,
-        helpers::{index_selectors, spawn},
+        helpers::index_selectors,
         hooks::Hook,
         layout::{bottom_stack, side_stack, Layout, LayoutConf},
         manager::WindowManager,
         ring::Selector,
-        xconnection::{XConn, Xid},
+        xconnection::XConn, KeyEventHandler,
     },
     logging_error_handler,
     xcb::{XcbConnection, XcbHooks},
@@ -25,16 +27,17 @@ use penrose::{
 };
 
 use simplelog::{LevelFilter, SimpleLogger, WriteLogger};
-use tracing::info;
+
+use penrose_ym::{Wm,Conn ,actions::power_menu, actions};
+
+use tracing_subscriber::{self, prelude::*, EnvFilter};
 
 struct StartupHook {}
 impl<X: XConn> Hook<X> for StartupHook {
     fn startup(&mut self, _wm: &mut WindowManager<X>) -> Result<()> {
-        spawn("~/.fehbg &")?;
-        spawn("picom -b --config ~/.config/picom/picom.conf &")?;
-        spawn("wired -r &")?;
-
-        Ok(())
+        spawn!("wired -r &")?;
+        spawn!("picom -b --config ~/.config/picom/picom.conf &")?;
+        spawn!("/home/yousof/.fehbg &")
     }
 }
 
@@ -42,14 +45,45 @@ impl<X: XConn> Hook<X> for StartupHook {
 // be run each time a new client program is spawned.
 struct MyClientHook {}
 impl<X: XConn> Hook<X> for MyClientHook {
-    fn new_client(&mut self, wm: &mut WindowManager<X>, id: Xid) -> Result<()> {
-        let c = wm.client(&Selector::WinId(id)).unwrap();
-        info!("new client with WM_CLASS='{}'", c.wm_class());
-        Ok(())
-    }
+    // fn new_client(&mut self, wm: &mut WindowManager<X>, id: Xid) -> Result<()> {
+    //     let c = wm.client(&Selector::WinId(id)).unwrap();
+    //     info!("new client with WM_CLASS='{}'", c.wm_class());
+    //     Ok(())
+    // }
 }
 
 fn main() -> Result<()> {
+    let tracing_builder = tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_env_filter("info")
+        .with_filter_reloading();
+
+    let reload_handle = tracing_builder.reload_handle();
+
+    tracing_builder.finish().init();
+
+    let set_trace_filter = Box::new(move |wm: &mut Wm| {
+        let options = vec!["show_docs", "trace", "debug", "info"];
+        let doc_url = "https://docs.rs/tracing-subscriber/0.2.25/tracing_subscriber/filter/struct.EnvFilter.html"
+        let menu = DMenu::new("filter: ", options, DMenuConfig::default());
+        let new_filter = match menu.run(wm.active_screen_index())? {
+            MenuMatch::Line(_, selection) if &selection == "show docs" => {
+                return spawn!(format!("firefox {doc_url}"));
+            }
+            MenuMatch::Line(_, level) => level,
+            MenuMatch::UserInput(custom) => custom,
+            MenuMatch::NoMatch => return Ok(()),
+        };
+        warn!(?new_filter, "attemption to update tracing filter");
+        let f = new_filter
+            .parse::<EnvFilter>()
+            .map_err(|e| perror!("unable to set filter: {e}"))?;
+        warn!("reloading tracing handle");
+        reload_handle.reload(f)
+        .map_err(|e| perror!("invalid filter: {e}"))
+    }) as KeyEventHandler<Conn>;
+
     // penrose will log useful information about the current state of the WindowManager during
     // normal operation that can be used to drive scripts and related programs. Additional debug
     // output can be helpful if you are hitting issues.
@@ -80,14 +114,14 @@ fn main() -> Result<()> {
         floating: false,
         gapless: true,
         follow_focus: true,
-        allow_wrapping: false,
+        allow_wrapping: true,
     };
 
     // Default number of clients in the main layout area
     let n_main = 1;
 
     // Default percentage of the screen to fill with the main area of the layout
-    let ratio = 0.6;
+    let ratio = 0.5;
 
     // Layouts to be used on each workspace. Currently all workspaces have the same set of Layouts
     // available to them, though they track modifications to n_main and ratio independently.
@@ -120,6 +154,8 @@ fn main() -> Result<()> {
     // trigger the bound scratchpad client.
     let sp = Scratchpad::new(term, 0.8, 0.8);
 
+    let spotify_sp = Scratchpad::new("spotify", 0.7, 0.7);
+
     let hooks: XcbHooks = vec![
         Box::new(MyClientHook {}),
         Box::new(StartupHook {}),
@@ -132,6 +168,7 @@ fn main() -> Result<()> {
         // workspace "9" active while it has no clients.
         DefaultWorkspace::new("9", "[side]", vec![term, term, file_manager]),
         sp.get_hook(),
+        spotify_sp.get_hook(),
     ];
 
     /* The gen_keybindings macro parses user friendly key binding definitions into X keycodes and
@@ -145,9 +182,9 @@ fn main() -> Result<()> {
      */
     let key_bindings = gen_keybindings! {
         // launch programs
-        "M-S-Return" => run_external!(term);
         "M-f" => run_external!("firefox");
         "M-p" => run_external!(laucnher);
+        "M-S-Return" => run_external!(term);
 
         // client management
         "M-k" => run_internal!(cycle_client, Forward);
@@ -157,11 +194,12 @@ fn main() -> Result<()> {
         "M-S-c" => run_internal!(kill_client);
         "M-S-f" => run_internal!(toggle_client_fullscreen, &Selector::Focused);
         "M-slash" => sp.toggle();
+        "M-m" => spotify_sp.toggle();
 
         //workspace management
         "M-Tab" => run_internal!(toggle_workspace);
-        "M-bracketright" => run_internal!(cycle_screen, Forward);
-        "M-bracketleft" => run_internal!(cycle_screen, Backward);
+        "M-W" => run_internal!(cycle_screen, Forward);
+        "M-E" => run_internal!(cycle_screen, Backward);
         "M-S-bracketright" => run_internal!(drag_workspace, Forward);
         "M-S-bracketleft" => run_internal!(drag_workspace, Backward);
 
@@ -175,7 +213,8 @@ fn main() -> Result<()> {
 
 
         "M-A-s" => run_internal!(detect_screens);
-        "M-S-q" => run_internal!(exit);
+        "M-S-q" => power_menu();
+        "M-S-C-q" => run_internal!(exit);
 
        // Each keybinding here will be templated in with the workspace index of each workspace,
        // allowing for common workspace actions to be bound at once.
@@ -200,20 +239,9 @@ fn main() -> Result<()> {
     wm.init()?;
     wm.detect_screens()?;
 
-    // NOTE If you are using the default XCB backend provided in the penrose xcb module, then the
-    //       construction of the XcbConnection and resulting WindowManager can be done using the
-    //       new_xcb_backed_window_manager helper function like so:
-    //
-    // let mut wm = new_xcb_backed_window_manager(config)?;
-
-    let mouse_bindings = gen_mousebindings! {
-        Press Right + [Meta] => |wm: &mut WindowManager<_>, _: &MouseEvent| wm.cycle_workspace(Forward),
-        Press Left + [Meta] => |wm: &mut WindowManager<_>, _: &MouseEvent| wm.cycle_workspace(Backward)
-    };
-
     // grab_keys_and_run will start listening to events from the X server and drop into the main
     // event loop. From this point on, program control passes to the WindowManager so make sure
     // that any logic you wish to run is done before here!
-    wm.grab_keys_and_run(key_bindings, mouse_bindings)?;
+    wm.grab_keys_and_run(key_bindings, HashMap::new())?;
     Ok(())
 }

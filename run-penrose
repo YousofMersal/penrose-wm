@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+while true; do
+  # log out to a file
+  ~/.penrose/target/release/penrose-ym &> ~/.penrose/logs/output.log
+  [[ $? > 0 ]] && mv ~/.penrose/logs/output.log ~/.penrose/logs/pre-output.log
+  export RESTARTED=true
+done
